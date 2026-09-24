@@ -3,7 +3,7 @@ title: "Terraformでdev/prodを分離したAWS Webアプリ基盤を構築して
 emoji: "🏗️"
 type: "tech"
 topics: ["aws", "terraform"]
-published: false
+published: true
 ---
 
 ## はじめに
@@ -15,13 +15,15 @@ FastAPIを用いたREST APIを、ALB / EC2 Auto Scaling / RDS PostgreSQLを中�
 制作は、要件定義 → 基本設計 → AWSマネジメントコンソールでの構築 → TerraformによるIaC化の順に進めました。
 コンソール上で各リソースの役割と通信経路、依存関係を確認し、その理解をTerraformの変数やmoduleの参照関係へ落とし込んでいます。
 
-本記事では、TerraformによるAWS基盤の構築と、共通構成を保ちながらdev／prodの要件差をコード化した方法を中心に紹介します。
+本記事では、TerraformによるAWS基盤の構築と、共通構成を保ちながらdev/prodの要件差をコード化した方法を中心に紹介します。
 ソースコード・Terraform・要件定義書・基本設計書・README・構成図は、[Dev-PortfolioのGitHubリポジトリ](https://github.com/sakuyaxx21-sys/dev-portfolio)で公開しています。
 
 ## 構築したシステムと要件
 
 アプリケーションには、一般ユーザーが申請を作成し、管理者が承認・却下する機能を実装しています。
 インフラについては、`docs/requirements.md`で次の方針を定めています。
+
+<!-- markdownlint-disable MD033 -->
 
 | 観点 | 要件・方針 |
 | --- | --- |
@@ -31,6 +33,8 @@ FastAPIを用いたREST APIを、ALB / EC2 Auto Scaling / RDS PostgreSQLを中�
 | 機密情報 | DB認証情報とアプリケーションのSecretをSecrets Managerで管理する |
 | 運用 | インフラをTerraformで管理し、ログ収集・監視通知も構成に含める |
 | コスト | devは検証コストを抑え、prodは本番を想定した可用性と保護を重視する |
+
+<!-- markdownlint-enable MD033 -->
 
 実行基盤にはEC2＋Dockerを選びました。
 ECSで抽象化する前に基盤を理解することと、Dockerでポータビリティを持たせることを意図しています。
@@ -70,7 +74,7 @@ Terraformを採用したのは、コンソールで構築した基盤をコー�
 
 今回のIaC化では、次の3点を軸に整理しています。
 
-- **共通構成はmoduleにまとめる**：VPCやALB、RDSの定義をdev／prodから再利用します。
+- **共通構成はmoduleにまとめる**：VPCやALB、RDSの定義をdev/prodから再利用します。
 - **環境差分は変数で渡す**：NAT Gateway数やRDS Multi-AZなど、要件によって変わる値を環境側で管理します。
 - **依存関係は参照でつなぐ**：Subnet IDやSecurity Group IDをoutputで受け渡し、リソース同士の関係を明示します。
 
@@ -103,14 +107,14 @@ infra/
 `locals.tf`では環境名とプロジェクト名から名前の接頭辞を作り、Providerの`default_tags`で`Project`、`Env`、`ManagedBy`を設定しています。
 
 リポジトリの`.terraform-version`はTerraform `1.15.5`です。
-環境側の`versions.tf`ではAWS Providerを`>= 5.61.0, < 6.0.0`に制約し、dev／prodのロックファイルでは`5.100.0`を選択しています。
+環境側の`versions.tf`ではAWS Providerを`>= 5.61.0, < 6.0.0`に制約し、dev/prodのロックファイルでは`5.100.0`を選択しています。
 
 ### bootstrapでstateの保存先を分ける
 
 `bootstrap`では、環境のstateを保存するS3バケットを作成します。
 バージョニング、パブリックアクセスのブロック、SSE-S3による暗号化を設定しています。
 
-dev／prodは同じバケットを参照し、キーをそれぞれ`envs/dev/terraform.tfstate`と`envs/prod/terraform.tfstate`に分けています。
+dev/prodは同じバケットを参照し、キーをそれぞれ`envs/dev/terraform.tfstate`と`envs/prod/terraform.tfstate`に分けています。
 環境ディレクトリごとにS3 Backendを持つ構成で、Terraform workspaceによる切り替えではありません。
 
 `backend.tf`では`encrypt = true`と`use_lockfile = true`を設定しています。
@@ -119,7 +123,7 @@ S3 Backendのstate lockを使う構成です。
 
 この分離により、stateの保存先を用意する構成と、アプリケーション基盤を作る構成を別のroot moduleとして扱っています。
 
-## dev／prodで変えていること
+## dev/prodで変えていること
 
 要件定義では、devは低コストで検証しやすく、prodは本番を想定した可用性と保護を重視する方針です。
 現在の`infra/envs/{dev,prod}/variables.tf`にある既定値は次のとおりです。
@@ -280,7 +284,7 @@ EC2にはそのSecretを読む権限を与え、起動時に取得します。
 `operations`ではログ保存先と通知先を、`monitoring`ではASG、ALB、Target Group、RDSのAlarmを定義しています。
 アプリケーションを動かすリソースに加えて、起動後の状態を確認するための構成もmoduleとして管理しています。
 
-CIには`terraform fmt -check`と、dev／prodそれぞれの`terraform validate`を組み込んでいます。
+CIには`terraform fmt -check`と、dev/prodそれぞれの`terraform validate`を組み込んでいます。
 共通moduleの変更を両環境から確認することで、環境側との入力・出力の不整合を検出しやすくしています。
 
 GitHub ActionsとSSMによるデプロイ、重要度別の監視通知、WAFのルール調整については、別の記事で詳しく扱う予定です。
@@ -312,7 +316,7 @@ moduleを分割しても、入力と出力をたどることで全体のつな�
 ## まとめ
 
 Dev-Portfolioでは、要件定義・基本設計からAWS上での構築を経て、基盤をTerraformでIaC化しました。
-`bootstrap`、`envs`、`modules`に構成を分け、通信経路とリソース間の依存関係を参照でつなぎ、dev／prodの違いを変数で表現しています。
+`bootstrap`、`envs`、`modules`に構成を分け、通信経路とリソース間の依存関係を参照でつなぎ、dev/prodの違いを変数で表現しています。
 
 NAT Gateway、RDS Multi-AZ、バックアップや削除保護を通じて、コストと可用性・データ保護の違いを設計へ反映しました。
 AWSの構成を理解したうえでコードに落とし込むことが、再利用でき、意図を説明できるインフラにつながると感じています。
