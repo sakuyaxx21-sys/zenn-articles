@@ -8,12 +8,15 @@ published: false
 
 ## はじめに
 
-社内向け申請管理システムを題材に、AWS上でWeb APIの実行基盤「Dev-Portfolio」を構築しました。
-FastAPIをDockerで動かし、ALB、EC2 Auto Scaling Group、RDS for PostgreSQLを組み合わせています。
+ポートフォリオ「Dev-Portfolio」として、Terraformを用いてAWS上に社内向け申請管理システム基盤を構築しました。
+FastAPIを用いたREST APIを、ALB / EC2 Auto Scaling / RDS PostgreSQLを中心としたWeb三層構成で動かしています。
+冗長化・可用性、セキュリティ、運用性、コストを考慮して設計しました。
 
 制作は、要件定義 → 基本設計 → AWSマネジメントコンソールでの構築 → TerraformによるIaC化の順に進めました。
 コンソール上で各リソースの役割と通信経路、依存関係を確認し、その理解をTerraformの変数やmoduleの参照関係へ落とし込んでいます。
-この記事では、共通構成を保ちながらdev／prodの要件差をどうコード化したかを紹介します。
+
+本記事では、TerraformによるAWS基盤の構築と、共通構成を保ちながらdev／prodの要件差をコード化した方法を中心に紹介します。
+ソースコード・Terraform・要件定義書・基本設計書・README・構成図は、[Dev-PortfolioのGitHubリポジトリ](https://github.com/sakuyaxx21-sys/dev-portfolio)で公開しています。
 
 ## 構築したシステムと要件
 
@@ -23,7 +26,7 @@ FastAPIをDockerで動かし、ALB、EC2 Auto Scaling Group、RDS for PostgreSQL
 | 観点 | 要件・方針 |
 | --- | --- |
 | 通信経路 | インターネットからの入口をALBに限定し、EC2とRDSを直接公開しない |
-| 可用性 | 複数AZにまたがる構成とし、ALBとASGを利用する。prodではRDS Multi-AZを有効にする |
+| 可用性 | 複数AZにまたがる構成とし、ALBとASGを利用する<br>prodではRDS Multi-AZを有効にする |
 | 運用接続 | EC2へのSSH接続は行わず、Systems Managerを利用する |
 | 機密情報 | DB認証情報とアプリケーションのSecretをSecrets Managerで管理する |
 | 運用 | インフラをTerraformで管理し、ログ収集・監視通知も構成に含める |
@@ -63,7 +66,7 @@ Private Appからの外向き通信はNAT Gatewayを経由させ、DB用サブ�
 ## Terraformを採用した理由
 
 Terraformを採用したのは、コンソールで構築した基盤をコードとして管理し、同じ設計をもとに環境ごとの要件を反映できるようにするためです。
-構築した人だけが設定を把握する状態を避け、構成と変更内容をコードから追えることを重視しました。
+インフラ構成の属人化を防ぎ、構成と変更内容をコードから追える状態にすることを重視しました。
 
 今回のIaC化では、次の3点を軸に整理しています。
 
@@ -227,8 +230,7 @@ resource "aws_autoscaling_group" "app" {
 ALBのTarget GroupをASGに関連付け、ELBのヘルスチェックを利用しています。
 異常と判定されたインスタンスをASGが置き換える仕組みについては、[AWSのヘルスチェックの説明](https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-checks-overview.html)に沿った設定です。
 
-ASGで希望台数を維持します。
-最大2台という設定は稼働台数の上限であり、CPU負荷に連動するScaling Policyは設定していません。
+ASGで希望台数を維持し、複数AZのPrivate App Subnetを対象として最大2台まで稼働できる構成にしています。
 
 EC2の起動設定までコードに含めることで、置き換え時にも同じ手順でアプリケーションを起動する構成にしています。
 起動処理はイメージ取得やDB接続も伴うため、確認時にはcloud-initのログとTarget Groupの状態を合わせて見ることが必要です。
@@ -270,7 +272,7 @@ EC2にはそのSecretを読む権限を与え、起動時に取得します。
 
 ここで、Secrets Managerを使うことと、Terraformのstateに機密値が残らないことは別です。
 現在のアプリ用Secretは`random_password`と`aws_secretsmanager_secret_version`で管理しており、stateも機密情報として保護する必要があります。
-`sensitive`の指定もstateへの保存を防ぐものではありません。
+`sensitive`は通常のCLI出力などで値の表示を抑制する指定であり、stateへの保存自体を防ぐものではありません。
 [HashiCorpの機密データ管理の説明](https://developer.hashicorp.com/terraform/language/manage-sensitive-data)で、この違いを確認できます。
 
 ## 基盤の運用もTerraformの管理対象にする
