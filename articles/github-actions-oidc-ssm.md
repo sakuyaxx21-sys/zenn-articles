@@ -3,7 +3,7 @@ title: "GitHub Actions × OIDC × SSMでAWSへのCI/CDを構築してみた"
 emoji: "🚀"
 type: "tech"
 topics: ["githubactions", "aws", "oidc", "ssm"]
-published: false
+published: true
 ---
 
 ## はじめに
