@@ -9,30 +9,24 @@ published: false
 ## はじめに
 
 ポートフォリオ「Dev-Portfolio」として、Terraformで構築したAWS基盤上に、FastAPIを用いた社内向け申請管理システムを動かしています。
-今回は、その基盤へGitHub ActionsからアプリケーションをデプロイするCI/CDを構築しました。
-
-中心となるのは、OIDCによるAWS認証と、Systems Manager（SSM）Run CommandによるEC2上のコンテナ更新です。
+GitHub Actionsからのデプロイには、OIDCによるAWS認証とSystems Manager（SSM）Run Commandによるコンテナ更新を組み合わせました。
 AWSの長期アクセスキーをGitHubへ保存せず、EC2のSSHポートも開けない構成にしています。
 
-第1記事「Terraformでdev/prodを分離したAWS Webアプリ基盤を構築してみた」では、基盤の構成と環境差分を扱いました。
+第1記事「[Terraformでdev/prodを分離したAWS Webアプリ基盤を構築してみた](https://zenn.dev/sakuyaxx21/articles/terraform-aws-infrastructure)」では、基盤の構成と環境差分を扱いました。
 本記事では、その上で「どのコードを、どの権限で、どのようにデプロイするか」を説明します。
-<!-- 第1記事の公開URL確認後、上のタイトルにリンクを設定する。 -->
 
 ソースコードは[Dev-PortfolioのGitHubリポジトリ](https://github.com/sakuyaxx21-sys/dev-portfolio)で公開しています。
 イメージの保存先にはDocker Hubを使用しています。
 
 ## 今回構築したCI/CD
 
-GitHub ActionsのWorkflowは、検証、アプリケーションの更新、インフラの変更に分けています。
+Workflowは検証、アプリケーション更新、インフラ変更に分けています。
 
 | Workflow名 | ファイル | 実行契機 | 役割 |
 | --- | --- | --- | --- |
 | `CI` | `.github/workflows/ci.yml` | Pull Request、mainへのpush | pytest、Terraformのfmt / validate |
 | `CD` | `.github/workflows/cd.yml` | mainで実行されたCIの完了、手動実行 | Docker imageのbuild / push、SSMデプロイ |
 | `Terraform CD` | `.github/workflows/terraform-cd.yml` | 手動実行 | dev / prodのplan / apply |
-
-`CD`の自動実行では、CIの結果が成功した場合にだけデプロイjobを動かします。
-`workflow_dispatch`による手動実行も用意しています。
 
 ### アプリケーションを届ける流れ
 
@@ -48,7 +42,7 @@ GitHub ActionsのWorkflowは、検証、アプリケーションの更新、イ�
 
 ここには、**イメージの配布経路**と**AWSへの認証・操作経路**があります。
 Docker HubへのpushにはDocker Hubの認証情報を使い、SSMの呼び出しにはOIDCで取得したAWS認証情報を使います。
-EC2へイメージ本体をSSM経由で転送する構成ではなく、SSMはEC2上で実行するコマンドを届けます。
+SSMはEC2上で実行するコマンドを届け、EC2がDocker Hubからイメージを取得します。
 
 ## GitHub ActionsからAWSへOIDCで認証する
 
@@ -63,8 +57,7 @@ OIDC（OpenID Connect）を使うと、GitHub Actionsの実行元をAWS側で検
 
 AWS側の定義は`infra/modules/security/github_actions.tf`にあります。
 OIDC ProviderのURLは`https://token.actions.githubusercontent.com`、audienceの既定値は`sts.amazonaws.com`です。
-既存ProviderのARNが渡された場合はそれを参照し、未指定の場合だけProviderを作成します。
-同じAWSアカウントでdev/prodを構築する際にも、既存Providerを共有できる形です。
+既存ProviderのARNが渡された場合はそれを共有し、未指定の場合だけProviderを作成します。
 
 ### Trust Policyで実行元を制限する
 
@@ -86,8 +79,7 @@ Condition = {
 ```
 
 `aud`でトークンの対象を、`sub`でリポジトリとブランチを照合しています。
-`github_actions_repository`と`github_actions_branch`は入力変数であり、Terraformコードに特定の値を固定していません。
-mainを許可する場合は、ブランチ変数に`main`を渡すことで、`ref:refs/heads/main`に対応します。
+リポジトリとブランチは入力変数で指定します。ブランチに`main`を渡すと、`ref:refs/heads/main`を照合します。
 
 Trust Policyは「誰がRoleを引き受けられるか」を定義します。
 引き受けた後に「何を操作できるか」は、Roleに付与するIAM Policyで決まります。
@@ -116,8 +108,7 @@ permissions:
 AWSリソースへの書き込み権限そのものを付与する設定ではありません。
 
 `AWS_ROLE_ARN`は引き受け先の識別子です。
-Secretsとして保存していますが、長期アクセスキーの代わりに認証能力を持つ秘密鍵を保存しているわけではありません。
-Roleを引き受けるには、AWS側のTrust Policyを満たすOIDCトークンが必要です。
+Secretsに保存したARNだけで認証できるわけではなく、Trust Policyを満たすOIDCトークンが必要です。
 
 ## CIでアプリケーションとTerraformを検証する
 
@@ -129,24 +120,10 @@ Roleを引き受けるには、AWS側のTrust Policyを満たすOIDCトークン
 | `Terraform Format` | `terraform fmt -check -recursive infra` |
 | `Terraform Validate` | matrixでdev / prodそれぞれの構成を検証 |
 
-バックエンドのテストは、`backend/tests/conftest.py`でSQLiteのテストDBとFastAPIの`TestClient`を用意しています。
-AWS上のRDSへ接続するテストではなく、CI内でアプリケーションの動作を確認する構成です。
-
-Terraformは`1.15.5`を使用し、validateの前に次の初期化を行います。
-
-```yaml
-- name: Initialize Terraform without backend
-  run: terraform init -backend=false
-
-- name: Validate Terraform configuration
-  run: terraform validate
-```
-
+Terraformは`1.15.5`を使用し、`terraform init -backend=false`の後に`terraform validate`を実行します。
 S3 Backendに接続せず、dev/prodそれぞれのroot moduleから構成を検証します。
-共通moduleの変更も、両環境との入力・出力の関係を含めて確認できます。
 
-CIではAWS認証やDockerイメージのbuild / pushは行いません。
-これらは、検証後に配布・更新を行うCDへ分けています。
+CIは検証を担当し、AWS認証、Dockerイメージのbuild / push、EC2へのデプロイはCDへ分けています。
 
 ## CIの結果とデプロイ対象のコミットをつなぐ
 
@@ -180,51 +157,33 @@ checkoutの`ref`とイメージタグには、どちらも次の式を使いま�
 ${{ github.event.workflow_run.head_sha || github.sha }}
 ```
 
-自動実行では、起点となったCIの`head_sha`を採用します。
-これにより、CI終了後に別のコミットがmainへ追加されても、対象のコードを取り違えずにbuildできます。
+自動実行ではCIの`head_sha`を採用し、その後mainに別のコミットが追加されても、検証済みのコードをbuildします。
 手動実行では、その実行の`github.sha`を使用します。
 
-手動実行は、上のjob条件ではCI成功を前提にしていません。
-また、`workflow_dispatch`自体にmain限定の条件はなく、AWS認証時には別途Trust Policyのブランチ条件が評価されます。
-Workflowの起動条件と、AWS操作を許可する条件を分けて捉えることが重要です。
+`workflow_dispatch`による手動実行にも対応し、AWS操作時にはOIDCでRoleを引き受け、Trust PolicyとIAM Policyに従って操作します。
 
 ## DockerイメージをDocker Hubへpushする
 
-`backend/Dockerfile`は`python:3.11-slim`をベースに依存関係とアプリケーションを配置し、Uvicornを8000番ポートで起動します。
-CDではDocker Hubへログインし、Buildxを設定してからbuild / pushします。
+CDではDocker Hubへログインし、`backend/Dockerfile`からイメージをbuild / pushします。
+認証には`DOCKERHUB_USERNAME`と`DOCKERHUB_TOKEN`を使用します。
+タグに関係する部分を抜粋します。
 
 ```yaml
-- name: Log in to Docker Hub
-  uses: docker/login-action@v4
-  with:
-    username: ${{ secrets.DOCKERHUB_USERNAME }}
-    password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-- name: Set up Docker Buildx
-  uses: docker/setup-buildx-action@v4
-
 - name: Build and push Docker image
   uses: docker/build-push-action@v7
   with:
     context: backend
     file: backend/Dockerfile
     push: true
-    pull: true
-    no-cache: true
+    # その他のbuild設定は省略
     tags: |
       ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
       ${{ env.DOCKER_IMAGE }}:latest
 ```
 
-`DOCKER_IMAGE`にはGitHub Variablesの`DOCKER_IMAGE_NAME`を渡します。
-`IMAGE_TAG`は前節のコミットSHAです。
-`pull: true`でベースイメージの取得を試み、`no-cache: true`でbuildキャッシュを使わずにビルドします。
-
-pushするタグは2つありますが、SSMによる更新ではSHAタグを指定します。
-実行ログやイメージ名から、デプロイ対象のソースコードを追えるようにしています。
-
-なお、ローカル開発用の`backend/docker-compose.yml`ではアプリケーションとPostgreSQLを起動しますが、EC2の更新処理ではComposeを使いません。
-AWS上ではRDSへ接続し、コンテナは`docker run`で起動します。
+`DOCKER_IMAGE`にはGitHub Variablesの`DOCKER_IMAGE_NAME`、`IMAGE_TAG`には前節のコミットSHAを渡します。
+SHAと`latest`の2タグをpushし、SSMによる更新ではSHAタグを指定します。
+これにより、CIで検証したコミット、buildするコード、EC2がpullするイメージを対応させています。
 
 ## SSM Run CommandでEC2へデプロイする
 
@@ -234,23 +193,19 @@ AWS上ではRDSへ接続し、コンテナは`docker run`で起動します。
 Security GroupはALBからのアプリケーションポートだけを受け付け、22番ポートを許可していません。
 CDにもSSMを使うことで、この通信方針を保ったままコンテナを更新できます。
 
-EC2側には、Instance Profileを通じて`app_ec2` Roleを付与しています。
-このRoleには`AmazonSSMManagedInstanceCore`を付け、SSM AgentがSystems Managerと通信できるようにしています。
-SSM Agentはサービスからの要求を処理し、実行結果を返します。仕組みは[AWSのSSM Agentの説明](https://docs.aws.amazon.com/systems-manager/latest/userguide/ssm-agent.html)を参照してください。
-
-AMIは通常版のAmazon Linux 2023を選択し、プリインストールされたSSM Agentを利用する構成です。
-user dataでSSM Agentを追加インストールする処理はありません。
-プリインストール対象は[AWSのAMI一覧](https://docs.aws.amazon.com/systems-manager/latest/userguide/ami-preinstalled-agent.html)で確認できます。
-Private App SubnetからのAWS APIアクセスやイメージ取得には、NAT Gateway経由の外向き通信を利用します。
+Run Commandを利用するには、EC2がSystems Managerの管理対象になっている必要があります。
+EC2にはInstance Profileを通じて`app_ec2` Roleを付与し、`AmazonSSMManagedInstanceCore`でSSMに必要な通信を許可しています。
+通常版のAmazon Linux 2023にプリインストールされたSSM Agentが、要求を処理して実行結果を返します。
+Agentの役割は[AWSのSSM Agentの説明](https://docs.aws.amazon.com/systems-manager/latest/userguide/ssm-agent.html)を参照してください。
+Systems Managerへの到達やイメージ取得には、Private App SubnetからNAT Gateway経由の外向き通信を利用します。
 
 GitHub Actions側のRoleはコマンドの**送信側**、EC2側のRoleはSSMの管理対象として動く**実行側**です。
-両者を分けて定義することで、WorkflowとEC2の責務を対応させています。
+両者を分けて定義し、WorkflowとEC2の責務を対応させています。
 
 ### Run Commandを送信する
 
 Workflowからは`.github/scripts/deploy-ec2-via-ssm.sh`を呼び出します。
-スクリプトは`jq`でコマンド列をJSONにし、一時ファイルへ保存してから送信します。
-送信部分の抜粋です。
+`jq`でコマンド列をJSONファイルにし、次のコマンドで送信します。
 
 ```bash
 aws ssm send-command \
@@ -264,8 +219,7 @@ aws ssm send-command \
   --output text
 ```
 
-対象は`SSM_TARGET_KEY`と`SSM_TARGET_VALUE`で指定します。
-WorkflowにインスタンスIDを固定せず、GitHub Variablesから対象条件を渡す構成です。
+対象条件はGitHub Variablesの`SSM_TARGET_KEY`と`SSM_TARGET_VALUE`から渡します。
 
 アプリCD用IAM Policyでは、`ssm:SendCommand`の対象を次のように定義しています。
 
@@ -317,31 +271,16 @@ CDは既存のファイルを利用し、DBパスワードをGitHub Actionsか�
 | GitHub Actions | `curl -fsS "$APP_HEALTH_URL"` | 設定した公開URLがHTTP応答を返すこと |
 
 EC2内で応答が得られなければ、コンテナログの末尾100行を出力して失敗させます。
-SSMの完了確認に加え、外側からもHTTP応答を確認することで、更新処理と公開経路をそれぞれ確認しています。
+SSMの実行結果と内外のHTTP応答を組み合わせ、更新処理と公開経路を確認します。
 
 ## Terraformのplan / applyは別のWorkflowで実行する
 
 `Terraform CD`は`workflow_dispatch`専用です。
 `environment`に`dev` / `prod`、`action`に`plan` / `apply`を選び、`infra/envs/${{ inputs.environment }}`で実行します。
 
-AWS認証には、アプリCD用とは別の`AWS_TERRAFORM_ROLE_ARN`を使います。
-初期化、fmt、validateの後に、次のstepを実行します。
-
-```yaml
-- name: Create Terraform plan
-  run: terraform plan -out=tfplan
-
-- name: Show Terraform plan
-  run: terraform show -no-color tfplan
-
-- name: Apply Terraform plan
-  if: inputs.action == 'apply'
-  run: terraform apply -auto-approve tfplan
-```
-
-`plan`を選ぶと実行計画の表示まで、`apply`を選ぶと同じ実行内で作成した`tfplan`を適用します。
-別のplan実行で保存した成果物を、後から承認して適用する方式ではありません。
-現在のWorkflowには`destroy`の選択肢やstepはありません。
+AWS認証はOIDCを使い、アプリCD用とは別の`AWS_TERRAFORM_ROLE_ARN`を指定します。
+初期化、fmt、validateの後、`terraform plan -out=tfplan`で実行計画を保存して表示します。
+`apply`を選んだ場合は、同じ実行内の`tfplan`を`terraform apply -auto-approve tfplan`で適用します。
 
 ### Terraform用RoleはEnvironmentを信頼条件にする
 
@@ -357,70 +296,32 @@ StringLike = {
 }
 ```
 
-ここでは、対象リポジトリの`dev` / `prod` Environmentを条件にしています。
-WorkflowにもこのTrust Policyにも、Terraform実行をmainへ限定する条件はありません。
-`TF_GITHUB_ACTIONS_BRANCH`はアプリCD用Roleの信頼条件へ渡す変数であり、Terraform Workflow自身の実行ブランチを制限するものではありません。
+対象リポジトリの`dev` / `prod` Environmentを条件として、Terraform用Roleを引き受けます。
 
 Terraformが担うのはAWSリソースとEC2の初回起動設定です。
 アプリCDは、すでに起動しているEC2のコンテナ更新を担います。
-日々のアプリケーション更新と基盤変更を、別のWorkflow・Roleで扱う構成です。
 
 ## CI/CDで意識した設定と権限の分離
 
-設定値と認証情報は、用途に応じて管理場所を分けています。
+設定値と認証情報は、次のように管理場所を分けています。
 
-| 管理場所 | 主な値 | 用途 |
-| --- | --- | --- |
-| GitHub Secrets | `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN` | イメージのpush認証 |
-| GitHub Secrets | `AWS_ROLE_ARN`、`AWS_TERRAFORM_ROLE_ARN` | OIDCで引き受けるRoleの指定 |
-| GitHub Variables | `AWS_REGION`、`DOCKER_IMAGE_NAME` | AWSの操作先とイメージ名 |
-| GitHub Variables | `SSM_TARGET_KEY`、`SSM_TARGET_VALUE` | Run Commandの対象指定 |
-| GitHub Variables | `APP_CONTAINER_NAME`、`APP_ENV_FILE`、`APP_PORT`、`APP_HEALTH_URL` | コンテナ起動・確認設定 |
-| GitHub Variables | `TF_PROJECT`、`TF_DOCKER_IMAGE_NAME`、`TF_DOCKER_IMAGE_TAG`など | Terraformの入力 |
-| AWS Secrets Manager | DB認証情報、アプリケーションSecret | EC2上の実行時設定 |
+| 管理場所 | 管理する情報 |
+| --- | --- |
+| GitHub Secrets | Docker Hubの認証情報、OIDCで引き受けるRole ARN |
+| GitHub Variables | リージョン、イメージ名、SSM対象、コンテナ・health check設定、Terraformの入力などの非機密情報 |
+| AWS Secrets Manager | DB認証情報、アプリケーションSecret |
 
-Terraformでは、リポジトリ・ブランチ、ドメイン、Slack通知先も`TF_*`のVariablesから渡しています。
-既存OIDC Providerを使う場合は、任意の`TF_GITHUB_ACTIONS_OIDC_PROVIDER_ARN`を追加します。
-両CD Workflowは、必要な設定値が空の場合に処理を止めるチェックを持っています。
-
-OIDCによって不要になるのは、AWS認証用の長期アクセスキーの保存です。
+OIDCによって不要になるのはAWS認証用の長期アクセスキーの保存です。
 Docker Hubの認証情報や、アプリケーションの機密情報は引き続き必要です。
-
-また、認証方式、Roleの信頼条件、Roleに付与する操作権限は、それぞれ確認する必要があります。
-今回の実装では、アプリCD・Terraform・EC2でRoleを分け、用途に対応させています。
-
-## CI/CDを構築して得た理解
-
-### SSMにはIAM・通信経路・Agentの準備が必要
-
-構築中、EC2へのSession Manager接続で`TargetNotConnected`が発生しました。
-調査では、EC2の稼働状態、Instance Profile、`AmazonSSMManagedInstanceCore`、NAT Gatewayへの経路を確認し、そのうえでSSMへの登録状態と使用中のAMIを調べました。
-
-原因は、AMIの検索条件が広く、SSM Agentを含まないMinimal AMIを選択していたことでした。
-現在は`infra/modules/app/app.tf`で、次の条件に絞っています。
-
-```hcl
-filter {
-  name   = "name"
-  values = ["al2023-ami-2023*-x86_64"]
-}
-```
-
-これはSession Managerで発見した問題ですが、Run CommandでもEC2がSSMの管理対象として利用できることが前提になります。
-IAM Roleを付けることに加え、Agentと通信経路まで確認して初めて、SSM経由の操作につながると理解しました。
-
-### 認証・成果物・実行結果をつなげて考える
-
-認証については、OIDCの設定だけでなく、Workflowの実行コンテキストとTrust Policyの対応が重要でした。
-アプリCDではブランチ、TerraformではEnvironmentを照合するため、同じGitHub Actionsからの実行でもRoleごとに条件が異なります。
-
-デプロイについては、CIのコミットSHAをcheckoutとイメージタグへ引き継ぎ、Run Commandの結果を待ってから公開URLを確認しています。
-「どのコードを更新したか」と「どこまで処理が完了したか」を追えることが、パイプラインを理解し、問題を切り分けるうえで重要だと感じました。
+両CD Workflowでは、必要な設定値が空の場合に処理を止めるチェックも行っています。
 
 ## まとめ
 
-Dev-Portfolioでは、GitHub Actionsで検証したコードをDockerイメージとして配布し、OIDCとSSMを使ってAWS上のEC2へデプロイする構成を実装しました。
-AWS認証には一時的な認証情報を使い、コンテナ更新にはSSHを開けずに実行できるRun Commandを利用しています。
+Dev-Portfolioでは、GitHub Actionsでの検証からDockerイメージの配布、OIDCとSSMによるEC2へのデプロイまでを実装しました。
+アプリCD・Terraform・EC2でRoleを分け、アプリケーション更新と基盤変更を別のWorkflowで扱っています。
 
-アプリケーション更新とTerraformによる基盤変更を分け、それぞれのWorkflow、Role、実行条件を対応させました。
-個々の自動化処理に加えて、実行元の認証から成果物の特定、更新結果の確認までをつなぐことが、CI/CDを設計するうえで大切だと考えています。
+構築を通じて、認証・成果物・実行結果を一連のパイプラインとして考えることが重要だと理解しました。
+OIDC認証では実行コンテキストとTrust Policyを対応させ、自動デプロイではCIのコミットSHAをcheckout、イメージタグ、EC2のpullへ引き継ぎます。
+さらに、SSMの実行結果を待ち、localhostと公開URLのヘルスチェックで確認します。
+
+「どの権限で、どのコードを更新し、どこまで処理が完了したか」を追えることが、CI/CDの設計と運用につながると考えています。
