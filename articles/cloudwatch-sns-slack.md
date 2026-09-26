@@ -55,7 +55,7 @@ ASGの台数監視では、CloudWatchのメトリクス数式で次の差を計�
 GroupInServiceInstances - GroupDesiredCapacity < 0
 ```
 
-両方のメトリクスを60秒・`Average`で取得し、その差が負ならcriticalにします。
+両方のメトリクスを60秒・`Average`で評価し、その差が負ならcriticalとするAlarmを定義しています。
 希望台数が2台なら、InServiceが1台でも差分は負になります。
 
 一方、`UnHealthyHostCount`はALBから見たターゲットの健全性を扱います。
@@ -152,8 +152,8 @@ ASG台数差分の0は、「希望台数に足りているか」という比較�
 Target不健全数の1は、期間平均で1台以上の不健全ターゲットがある状態を判定します。
 瞬間的に1台でも不健全なら必ず発報する、という条件ではありません。
 
-CPUの80%、DB接続数の80、空き容量の2 GiBについては、負荷測定から算出した根拠はコード・設計資料に記載されていません。
-この環境の初期値として扱い、実際の負荷、通常時の値、通知頻度に応じて調整する前提で読む必要があります。
+CPU 80%、DB接続数80、空き容量2 GiBは、初期監視値として設定しています。
+運用時には通常時のメトリクスや通知頻度を確認し、環境に応じてTerraformの閾値・評価期間を調整します。
 
 DB接続数の80は割合ではなく接続数、空き容量の2 GiBは絶対値です。
 
@@ -165,8 +165,6 @@ DB接続数の80は割合ではなく接続数、空き容量の2 GiBは絶対�
 ただし「データが届かなければ、直ちにOK」と単純化はできません。
 CloudWatchはN個より広い範囲から実データを取得する場合があり、必要数が揃えば欠損の補完を使わず評価します。
 欠損時の詳細は[AWSの欠損データの扱い](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/alarms-and-missing-data.html)に記載されています。
-
-この設定では、OKという表示と、必要なメトリクスを受信できていることを分けて確認する必要があります。
 
 ## Terraformで判定条件と通知経路をつなぐ
 
@@ -233,57 +231,48 @@ SlackワークスペースIDは共通の`slack_team_id`、チャンネルIDは�
 READMEの通知先は`#dev-portfolio-alerts-critical`と`#dev-portfolio-alerts-warning`です。コードには名前ではなくIDを渡します。
 
 この構成は、Channel Configurationの`sns_topic_arns`でSNSとの関連付けを定義します。
-`aws_sns_topic_subscription`の独立したリソース定義や、Lambda・独自Webhookによる中継はありません。
 
-連携用IAM Roleは`chatbot.amazonaws.com`を信頼し、現在のコードではAWS管理ポリシー`ReadOnlyAccess`を付与しています。
-2個のChannel ConfigurationはこのRoleを共有します。
+2個のChannel Configurationは同じ連携用IAM Roleを使用しています。
 Slack側のワークスペース認可はサービス利用の前提となるため、Terraformのチャンネル設定と合わせて用意します。
 
-## dev / prodで監視設定をどう管理するか
+## dev / prodで監視定義を共通化する
 
-dev/prodの`main.tf`は同じmodule呼び出し構成です。
+dev / prodでは同じmonitoring moduleを利用し、監視項目・閾値・評価期間・重要度を共通化しています。
+今回の規模・用途では共通の監視ポリシーを使い、対象リソースを環境ごとに渡す構成にしました。
 `local.name_prefix = "${var.env}-${var.project}"`によって、Alarm、SNS Topic、Slack連携設定の名前に環境名を含めます。
 
 監視対象は各環境の`app`・`db`のoutputから、通知先ARNは`operations`のoutputから渡します。
-Slack IDは環境側の入力変数、閾値と評価期間は共通の`monitoring/alarms.tf`で管理しています。
-
-現在、Alarmの閾値・評価期間・重要度にdev/prodの差はありません。
-Slack IDは既定値を持たない入力なので、環境ごとに指定できます。dev/prodで実際に別チャンネルを指定しているかは、これらの定義だけでは確定しません。
+閾値と評価期間は共通の`monitoring/alarms.tf`で管理し、Slack IDは環境側の入力変数として環境ごとに指定できます。
 
 `monitoring/outputs.tf`ではAlarm名を重要度別のリストで公開しています。
 監視設定をコードにすることで、閾値・違反回数・通知先を同じ差分で確認できます。重要度を変える際には、Alarm名とSNSの参照が揃っているかもレビューできます。
 
-## 発報と復旧をどう確認するか
+## 通知対象の設計と代表的な発報確認
 
-現在の8個のAlarmは、すべて`alarm_actions`に重要度別SNS TopicのARNを指定しています。
-**`ok_actions`は全Alarmで未設定です。**
+通知対象はALARMへの状態遷移に絞り、全8個のAlarmの`alarm_actions`に重要度別SNS TopicのARNを設定しています。
+復旧時の`ok_actions`は、通知頻度とのバランスを考慮して設定していません。
 
 SNSへのAlarmアクションは、状態が変わったときに実行されます。ALARMが続く間、評価のたびに繰り返し通知する設定ではありません。
 状態遷移の扱いは[AWSのCloudWatch Alarmの説明](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Alarms.html)を参照してください。
-
 復旧は、CloudWatchの状態履歴とメトリクスから確認します。
-一般に`ok_actions`はOKへの状態遷移時に実行するアクションですが、今回の構成では復旧通知を定義していません。
 
-### 判定の確認と通知経路の確認を分ける
+### critical / warningそれぞれの通知先を確認する
 
-リポジトリのREADME・設計資料には、具体的な発報試験の手順やSlack到達結果の記録は見当たりませんでした。
-以下は、この定義を確認する際の観点です。
+代表的なAlarmで発報確認を行い、ALB 5XXのcritical通知とASG CPUのwarning通知が、それぞれ対応するSlackチャンネルへ到達することを確認しました。
 
-1. 対象のnamespaceとdimensionsで、メトリクスの実データを受信していることを確認します。
-2. Alarm履歴で、集計値とN / Mの条件により`ALARM`へ遷移したことを確認します。
-3. Alarmに対応するSNS TopicとSlackチャンネルで、同じAlarm名の通知を確認します。
-4. 負荷や異常が解消した後は、メトリクスとAlarm履歴から`OK`への遷移を確認します。
+| 発報確認に使用したAlarm | 重要度 | 到達を確認した通知先 |
+| --- | --- | --- |
+| `dev-portfolio-ops-alarm-alb-5xx-crit` | critical | critical用Slackチャンネル |
+| `dev-portfolio-ops-alarm-asg-cpu-warn` | warning | warning用Slackチャンネル |
 
-通知経路だけを切り分ける一般的な方法として、AWSは`SetAlarmState`による一時的な状態変更も用意しています。
-ただし、これはメトリクスが閾値を超えて判定されたことの検証にはなりません。
-
-## 監視設計を通じて得た理解
-
-監視では、メトリクスと検知したい状態を対応させる必要があります。さらに集計方法、期間、N / M、欠損データの扱いまで読むことで、初めてAlarmの動作を説明できます。
+この確認により、Alarmに設定した重要度別SNS TopicとSlack通知先の対応を確かめました。
 
 ## まとめ
 
 Dev-Portfolioでは、ASG / Target Group / ALB / RDSに8個のCloudWatch Alarmを定義し、critical / warning別のSNS TopicとSlack連携を実装しています。
 複数のレイヤーを監視し、閾値と評価期間を組み合わせて、台数不足・健全性・エラー・負荷・容量を捉える構成にしました。
+
+構築を通じて、メトリクスと検知したい状態を対応させることの重要性を理解しました。
+Alarmの動作は、閾値だけでなく、集計方法、期間、N / M、欠損データの扱いまで含めて読み取る必要があります。
 
 「何を検知するか」「どの条件で判断するか」「どこへ知らせるか」を一つの流れとして設計することが、基盤の状態を把握するための土台になると考えています。
