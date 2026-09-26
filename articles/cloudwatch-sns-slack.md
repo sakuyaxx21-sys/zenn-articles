@@ -3,7 +3,7 @@ title: "CloudWatch Alarm × SNS × Slackで重要度別の監視通知を構築�
 emoji: "🔔"
 type: "tech"
 topics: ["aws", "cloudwatch", "sns", "slack"]
-published: false
+published: true
 ---
 
 ## はじめに
@@ -82,16 +82,19 @@ namespaceでメトリクスの所属を、`dimensions`で対象を特定しま�
 | RDSの3メトリクス | `AWS/RDS` | `DBInstanceIdentifier` |
 
 ALBとTarget GroupのdimensionsにはARNのsuffixを渡します。
-EC2 CPUはASG名で集約し、`Average`で評価する設定です。個々のEC2の最大CPU使用率を監視する条件とは区別しています。
+EC2 CPUはASG名で集約し、`Average`で評価する設定です。
+個々のEC2の最大CPU使用率を監視する条件とは区別しています。
 
 ## critical / warningの重要度設計
 
 criticalは、稼働台数不足、ターゲット異常、ALBの5XX、DB空き容量不足など、優先して状況を確認したい状態に割り当てています。
 warningは、CPU高負荷、ターゲットの5XX、DB接続数増加など、負荷やエラーの状況を調べるきっかけとして扱います。
 
-この分類はDev-Portfolioの設計判断です。warningのターゲット5XXも利用者に影響し得るため、影響の有無を分類しているわけではありません。
+この分類はDev-Portfolioの設計判断です。
+warningのターゲット5XXも利用者に影響し得るため、影響の有無を分類しているわけではありません。
 
-各Alarmは一つの重要度を持ちます。同じメトリクスにwarning / criticalの2段階の閾値は設定していません。
+各Alarmは一つの重要度を持ちます。
+同じメトリクスにwarning / criticalの2段階の閾値は設定していません。
 
 ### 名前にも重要度を含める
 
@@ -109,7 +112,8 @@ Alarmは、集計期間と閾値、違反が必要な回数を組み合わせて
 
 ### 現在の判定条件
 
-`M`の「省略」はコードに`datapoints_to_alarm`を記述していないことを示します。その場合はN個すべての違反を必要とする扱いです。
+`M`の「省略」はコードに`datapoints_to_alarm`を記述していないことを示します。
+その場合はN個すべての違反を必要とする扱いです。
 
 | Alarmの対象 | 集計 | period | 閾値違反の条件 | N | M |
 | --- | --- | --- | --- | --- | --- |
@@ -137,7 +141,8 @@ Target 5XXでは、`evaluation_periods = 3`、`datapoints_to_alarm = 3`です。
 | 1 → 0 → 1 | 2 | 満たさない |
 
 「3分間で合計3件以上」とは異なります。
-1分だけ3件発生しても、残り2期間が実測値の0なら条件を満たしません。この表の0は欠損ではなく、説明用の実測値です。
+1分だけ3件発生しても、残り2期間が実測値の0なら条件を満たしません。
+この表の0は欠損ではなく、説明用の実測値です。
 
 複数期間を使うことで、短い変動と継続する状態を分けて評価します。
 `period`は集計幅なので、「設定時間が経過した瞬間に必ずSlackへ届く」という到達時間の保証ではありません。
@@ -153,7 +158,7 @@ Target不健全数の1は、期間平均で1台以上の不健全ターゲット
 瞬間的に1台でも不健全なら必ず発報する、という条件ではありません。
 
 CPU 80%、DB接続数80、空き容量2 GiBは、初期監視値として設定しています。
-運用時には通常時のメトリクスや通知頻度を確認し、環境に応じてTerraformの閾値・評価期間を調整します。
+閾値・評価期間は、通常時のメトリクスや通知頻度に応じてTerraformから調整できる構成にしています。
 
 DB接続数の80は割合ではなく接続数、空き容量の2 GiBは絶対値です。
 
@@ -228,7 +233,8 @@ resource "aws_chatbot_slack_channel_configuration" "critical_alerts" {
 warning側にも同じ種類のリソースがあり、`slack_warning_channel_id`とwarning用TopicのARNを指定します。
 SlackワークスペースIDは共通の`slack_team_id`、チャンネルIDは重要度ごとに別入力です。
 
-READMEの通知先は`#dev-portfolio-alerts-critical`と`#dev-portfolio-alerts-warning`です。コードには名前ではなくIDを渡します。
+READMEの通知先は`#dev-portfolio-alerts-critical`と`#dev-portfolio-alerts-warning`です。
+コードには名前ではなくIDを渡します。
 
 この構成は、Channel Configurationの`sns_topic_arns`でSNSとの関連付けを定義します。
 
@@ -245,14 +251,16 @@ dev / prodでは同じmonitoring moduleを利用し、監視項目・閾値・�
 閾値と評価期間は共通の`monitoring/alarms.tf`で管理し、Slack IDは環境側の入力変数として環境ごとに指定できます。
 
 `monitoring/outputs.tf`ではAlarm名を重要度別のリストで公開しています。
-監視設定をコードにすることで、閾値・違反回数・通知先を同じ差分で確認できます。重要度を変える際には、Alarm名とSNSの参照が揃っているかもレビューできます。
+監視設定をコードにすることで、閾値・違反回数・通知先を同じ差分で確認できます。
+重要度を変える際には、Alarm名とSNSの参照が揃っているかもレビューできます。
 
 ## 通知対象の設計と代表的な発報確認
 
 通知対象はALARMへの状態遷移に絞り、全8個のAlarmの`alarm_actions`に重要度別SNS TopicのARNを設定しています。
 復旧時の`ok_actions`は、通知頻度とのバランスを考慮して設定していません。
 
-SNSへのAlarmアクションは、状態が変わったときに実行されます。ALARMが続く間、評価のたびに繰り返し通知する設定ではありません。
+SNSへのAlarmアクションは、状態が変わったときに実行されます。
+ALARMが続く間、評価のたびに繰り返し通知する設定ではありません。
 状態遷移の扱いは[AWSのCloudWatch Alarmの説明](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Alarms.html)を参照してください。
 復旧は、CloudWatchの状態履歴とメトリクスから確認します。
 
